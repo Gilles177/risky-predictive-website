@@ -36,7 +36,7 @@ Predict top crimes and incidents in Chicago using 2023-2024 crime data.
 3) Click "Get Prediction"
 """)
 
-# Data Loading - Simplified to avoid caching issues
+# Data Loading
 def load_ward_boundaries():
     """Load ward boundaries without caching"""
     csv_path = os.path.join("raw_data", "ward_demographics_boundaries.csv")
@@ -49,7 +49,7 @@ if 'ward_data' not in st.session_state:
     st.session_state.ward_data = load_ward_boundaries()
     st.session_state.ward_bound = pd.read_csv(os.path.join("raw_data", "ward_demographics_boundaries.csv"))
 
-# Ward finding function without caching
+# Ward finding function
 def find_ward(lat, lon):
     """Find ward for given coordinates"""
     point = Point(lon, lat)
@@ -59,39 +59,23 @@ def find_ward(lat, lon):
     return None
 
 # Map Configuration
-def create_layer(gdf, column_name, layer_name, show_layer=False):
-    """Create a folium map layer"""
-    colormap = LinearColormap(['green', 'yellow', 'red'],
-                             vmin=0, vmax=100,
-                             caption='Percentage (%)')
-
-    style = {
-        "fillColor": lambda x: colormap(x['properties'][column_name]),
+def style_function(feature, column_name, colormap):
+    """Style function for folium map"""
+    return {
+        "fillColor": colormap(feature['properties'][column_name]),
         "color": "blue",
         "weight": 1.5,
         "fillOpacity": 0.6,
     }
 
-    highlight = {
-        "fillColor": lambda x: colormap(x['properties'][column_name]),
+def highlight_function(feature, column_name, colormap):
+    """Highlight function for folium map"""
+    return {
+        "fillColor": colormap(feature['properties'][column_name]),
         "color": "red",
         "weight": 2,
         "fillOpacity": 0.8,
     }
-
-    layer = folium.GeoJson(
-        gdf,
-        name=layer_name,
-        tooltip=folium.features.GeoJsonTooltip(
-            fields=["Ward", column_name],
-            aliases=["Ward:", f"{layer_name}:"],
-            localize=True
-        ),
-        style_function=lambda x: style,
-        highlight_function=lambda x: highlight,
-        show=show_layer,
-    )
-    return layer, colormap
 
 # Create Map
 chicago_coords = [41.8781, -87.6298]
@@ -111,9 +95,25 @@ layer_name_mapping = {
 }
 
 # Add Layers to Map
-for i, (col, name) in enumerate(layer_name_mapping.items()):
-    layer, colormap = create_layer(st.session_state.ward_data, col, name, show_layer=(i==0))
+for i, (column, name) in enumerate(layer_name_mapping.items()):
+    colormap = LinearColormap(['green', 'yellow', 'red'],
+                             vmin=0, vmax=100,
+                             caption='Percentage (%)')
+    
+    layer = folium.GeoJson(
+        st.session_state.ward_data,
+        name=name,
+        tooltip=folium.features.GeoJsonTooltip(
+            fields=["Ward", column],
+            aliases=["Ward:", f"{name}:"],
+            localize=True
+        ),
+        style_function=lambda x, col=column, cm=colormap: style_function(x, col, cm),
+        highlight_function=lambda x, col=column, cm=colormap: highlight_function(x, col, cm),
+        show=(i == 0),
+    )
     layer.add_to(m)
+    
     if i == 0:
         colormap.add_to(m)
 
