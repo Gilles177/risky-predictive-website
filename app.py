@@ -2,127 +2,149 @@ import streamlit as st
 import requests
 from datetime import datetime, timedelta
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Point
-from shapely import wkt
+import json
+import os
 import plotly.express as px
 import plotly.graph_objects as go
-import os
 
 # Initialize session state
 if 'selected_ward' not in st.session_state:
     st.session_state.selected_ward = None
+if 'ward_data' not in st.session_state:
+    st.session_state.ward_data = None
+
+# Page configuration
+st.set_page_config(page_title="Crime Predictor", layout="wide")
+st.title("Chicago Crime Prediction System")
+
+# Data loading - simplified to avoid geopandas issues
+@st.cache_data
+def load_ward_data():
+    try:
+        csv_path = os.path.join("raw_data", "ward_demographics_boundaries.csv")
+        df = pd.read_csv(csv_path)
+        return df
+    except Exception as e:
+        st.error(f"Data loading failed: {str(e)}")
+        return None
 
 # Load data
-@st.cache_data
-def load_data():
-    csv_path = os.path.join("raw_data", "ward_demographics_boundaries.csv")
-    ward_bound = pd.read_csv(csv_path)
-    ward_bound['geometry'] = ward_bound['the_geom'].apply(wkt.loads)
-    gdf = gpd.GeoDataFrame(ward_bound, geometry='geometry', crs="EPSG:4326")
-    return gdf, ward_bound
+if st.session_state.ward_data is None:
+    st.session_state.ward_data = load_ward_data()
 
-gdf, ward_bound = load_data()
-
-# Create Plotly map
-def create_map(gdf):
-    gdf['center'] = gdf['geometry'].centroid
-    gdf['lat'] = gdf['center'].y
-    gdf['lon'] = gdf['center'].x
-    
-    fig = px.scatter_mapbox(gdf, 
-                          lat="lat", 
-                          lon="lon",
-                          hover_name="Ward",
-                          hover_data=["Race-White_pct", "Race-Black_pct"],
-                          zoom=10)
-    
-    fig.update_layout(mapbox_style="open-street-map")
-    fig.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
-    return fig
-
-# Display map
-st.header("Chicago Ward Map")
-map_fig = create_map(gdf)
-selected_point = st.plotly_chart(map_fig, use_container_width=True)
+if st.session_state.ward_data is None:
+    st.stop()
 
 # Ward selection
-wards = sorted(gdf['Ward'].unique())
-selected_ward = st.selectbox("Select Ward", wards)
+st.header("1. Select Location")
+wards = sorted(st.session_state.ward_data['Ward'].unique())
+selected_ward = st.selectbox("Choose a ward:", wards, key='ward_select')
 st.session_state.selected_ward = selected_ward
 
 # Time selection
-def get_middle_time(category, date):
-    time_ranges = {
-        "Late Night (00:00 to 06:00)": (0, 6),
-        "Early Morning (06:00 to 09:00)": (6, 9),
-        "Late Morning (09:00 to 12:00)": (9, 12),
-        "Early Noon (12:00 to 15:00)": (12, 15),
-        "Late Noon (15:00 to 18:00)": (15, 18),
-        "Early Night (18:00 to 24:00)": (18, 24)
+st.header("2. Select Time Parameters")
+
+def get_time_range():
+    time_options = {
+        "Late Night (12AM-6AM)": (0, 6),
+        "Morning (6AM-12PM)": (6, 12),
+        "Afternoon (12PM-6PM)": (12, 18),
+        "Evening (6PM-12AM)": (18, 24)
     }
+    selected_label = st.selectbox("Time period:", list(time_options.keys()))
+    selected_date = st.date_input("Date:", datetime.today())
     
-    if category in time_ranges:
-        start, end = time_ranges[category]
-        middle = datetime.combine(date, datetime.min.time()) + timedelta(hours=(start+end)/2)
-        return middle.strftime("%Y-%m-%d %H:%M")
-    return None
+    start, end = time_options[selected_label]
+    middle_hour = (start + end) / 2
+    prediction_time = datetime.combine(selected_date, datetime.min.time()) + timedelta(hours=middle_hour)
+    return prediction_time.strftime("%Y-%m-%d %H:%M")
 
-selected_date = st.date_input("Select Date", datetime.today())
-categories = list({
-    "Late Night (00:00 to 06:00)": (0, 6),
-    "Early Morning (06:00 to 09:00)": (6, 9),
-    "Late Morning (09:00 to 12:00)": (9, 12),
-    "Early Noon (12:00 to 15:00)": (12, 15),
-    "Late Noon (15:00 to 18:00)": (15, 18),
-    "Early Night (18:00 to 24:00)": (18, 24)
-}.keys())
-selected_category = st.selectbox("Select Time Category", categories)
-middle_time = get_middle_time(selected_category, selected_date)
+prediction_time = get_time_range()
 
-# Prediction function
-def get_prediction(ward, date_time):
+# Prediction API call
+def get_prediction(ward, time_str):
     api_url = "https://rpp2-589897242504.europe-west1.run.app/predict"
     payload = {
         "ward": ward,
-        "date_of_occurrence": date_time,
-        "latitude": 41.8781,  # Approximate Chicago coords
+        "date_of_occurrence": time_str,
+        "latitude": 41.8781,  # Chicago coordinates
         "longitude": -87.6298
     }
     
     try:
-        response = requests.post(api_url, json=payload)
+        response = requests.post(api_url, json=payload, timeout=10)
         if response.status_code == 200:
             return response.json()
+        else:
+            st.error(f"API Error: {response.status_code}")
+            return None
     except Exception as e:
-        st.error(f"Error: {str(e)}")
-    return None
+        st.error(f"Network error: {str(e)}")
+        return None
 
 # Display results
-if st.button("Get Prediction") and st.session_state.selected_ward:
-    result = get_prediction(st.session_state.selected_ward, middle_time)
-    
-    if result:
-        # Crime prediction chart
-        crimes = list(result["crime_types_probability"].keys())
-        probs = [v*100 for v in result["crime_types_probability"].values()]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=crimes,
-            y=probs,
-            name="Probability (%)"
-        ))
-        st.plotly_chart(fig)
-        
-        # Demographic data
-        ward_data = ward_bound[ward_bound['Ward'] == st.session_state.selected_ward].iloc[0]
-        
-        # Race pie chart
-        race_fig = px.pie(
-            values=[ward_data['Race-White_pct'], 
-                   ward_data['Race-Black_pct'],
-                   ward_data['Race-Asian_pct']],
-            names=['White', 'Black', 'Asian']
-        )
-        st.plotly_chart(race_fig)
+st.header("3. Get Prediction")
+if st.button("Predict Crime Risks"):
+    if st.session_state.selected_ward:
+        with st.spinner("Analyzing data..."):
+            result = get_prediction(st.session_state.selected_ward, prediction_time)
+            
+            if result:
+                # Crime prediction visualization
+                st.subheader("Crime Risk Assessment")
+                crimes = list(result["crime_types_probability"].keys())
+                probabilities = [round(p*100, 1) for p in result["crime_types_probability"].values()]
+                
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=crimes,
+                    y=probabilities,
+                    marker_color='crimson',
+                    text=probabilities,
+                    texttemplate='%{text}%',
+                    textposition='outside'
+                ))
+                fig.update_layout(
+                    title="Predicted Crime Probabilities",
+                    yaxis_title="Probability (%)",
+                    xaxis_title="Crime Type",
+                    height=500
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Demographic information
+                st.subheader("Ward Demographics")
+                ward_info = st.session_state.ward_data[st.session_state.ward_data['Ward'] == st.session_state.selected_ward].iloc[0]
+                
+                # Race breakdown
+                race_data = {
+                    "Race": ["White", "Black", "Asian", "Hispanic"],
+                    "Percentage": [
+                        ward_info['Race-White_pct'],
+                        ward_info['Race-Black_pct'],
+                        ward_info['Race-Asian_pct'],
+                        ward_info['Ethnicity-Hispanic_pct']
+                    ]
+                }
+                race_fig = px.pie(race_data, values='Percentage', names='Race', 
+                                 title='Racial Composition')
+                st.plotly_chart(race_fig, use_container_width=True)
+                
+                # Income breakdown
+                income_data = {
+                    "Income Bracket": ["<25k", "25k-50k", "50k-100k", "100k-150k", ">150k"],
+                    "Percentage": [
+                        ward_info['Income-24999_minus_pct'],
+                        ward_info['Income-25000-49999_pct'],
+                        ward_info['Income-50000-99999_pct'],
+                        ward_info['Income-100000-149999_pct'],
+                        ward_info['Income-150000_plus_pct']
+                    ]
+                }
+                income_fig = px.bar(income_data, x='Income Bracket', y='Percentage',
+                                   title='Income Distribution')
+                st.plotly_chart(income_fig, use_container_width=True)
+            else:
+                st.warning("No prediction data returned")
+    else:
+        st.warning("Please select a ward first")
